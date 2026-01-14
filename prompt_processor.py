@@ -44,37 +44,54 @@ class ProblemSpecification(BaseModel):
     edge_cases: List[str]
     assumptions: List[str]
 
-
-parser = PydanticOutputParser(pydantic_object=ProblemSpecification)
-
-
-# 3. Prompt
-prompt = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PROMPT),
-    (
-        "human",
-        "User input:\n{user_input}\n\n{format_instructions}",
-    ),
-])
+def build_parser() -> PydanticOutputParser:
+    return PydanticOutputParser(pydantic_object=ProblemSpecification)
 
 
-# 4. Model
-model = ChatOllama(
-    model="qwen3:14b",
-    validate_model_on_init=True,
-    temperature=0.0,
-)
+def build_prompt_template(system_prompt: str) -> ChatPromptTemplate:
+    return ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            (
+                "human",
+                "User input:\n{user_input}\n\n{format_instructions}",
+            ),
+        ]
+    )
 
 
-# 5. Chain
-chain = prompt | model | parser
+def build_model(*, model_name: str = "qwen3:8b", temperature: float = 0.0) -> ChatOllama:
+    return ChatOllama(
+        model=model_name,
+        validate_model_on_init=True,
+        temperature=temperature,
+    )
 
 
-if __name__ == "__main__":
-    result = chain.invoke(
+def build_chain(*, system_prompt: str = SYSTEM_PROMPT) -> tuple[object, PydanticOutputParser]:
+    parser = build_parser()
+    prompt = build_prompt_template(system_prompt)
+    model = build_model()
+    chain = prompt | model | parser
+    return chain, parser
+
+
+def process_user_input(user_input: str) -> ProblemSpecification:
+    chain, parser = build_chain()
+    return chain.invoke(
         {
-            "user_input": "Build a CLI tool that reads a CSV file and outputs summary statistics like mean, median, and mode for specified columns. The tool should handle missing values gracefully and allow users to specify which columns to analyze via command-line arguments.",
+            "user_input": user_input,
             "format_instructions": parser.get_format_instructions(),
         }
     )
+
+
+def main() -> None:
+    result = process_user_input(
+        "Build a CLI tool that reads a CSV file and outputs summary statistics like mean, median, and mode for specified columns. The tool should handle missing values gracefully and allow users to specify which columns to analyze via command-line arguments."
+    )
     print(result)
+
+
+if __name__ == "__main__":
+    main()
