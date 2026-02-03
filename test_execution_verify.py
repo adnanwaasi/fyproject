@@ -123,10 +123,153 @@ def create_sample_csv(filename: str, columns: list[str]) -> str:
 
 
 def execute_test(main_file: Path, test_case: TestCase, timeout: int = 10) -> TestResult:
-    """Execute a single test case and return the result."""
+    """Execute a single test case and return the result.
+    
+    This function supports two modes:
+    1. Function-based: Import the module and call functions directly
+    2. CLI-based: Run as subprocess with command-line arguments
+    """
     import time
+    import importlib.util
     
     start_time = time.time()
+    
+    try:
+        # First, try to import and execute as a module with functions
+        result = execute_as_function(main_file, test_case, timeout)
+        if result is not None:
+            return result
+        
+        # Fall back to CLI execution
+        return execute_as_cli(main_file, test_case, timeout, start_time)
+        
+    except Exception as e:
+        return TestResult(
+            test_id=test_case.test_id,
+            passed=False,
+            actual_output="",
+            expected_output=test_case.expected_output,
+            error_message=f"Execution error: {str(e)}",
+            execution_time=time.time() - start_time
+        )
+
+
+def execute_as_function(main_file: Path, test_case: TestCase, timeout: int = 10) -> Optional[TestResult]:
+    """Try to execute test by importing module and calling function directly."""
+    import time
+    import importlib.util
+    
+    start_time = time.time()
+    
+    try:
+        # Load the module
+        spec = importlib.util.spec_from_file_location("test_module", main_file)
+        if spec is None or spec.loader is None:
+            return None
+            
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        
+        # Find callable functions in the module
+        functions = {name: obj for name, obj in vars(module).items() 
+                    if callable(obj) and not name.startswith('_')}
+        
+        if not functions:
+            return None
+        
+        # Get the main function (first one or one matching common patterns)
+        func_name = None
+        input_data = test_case.input_data
+        
+        # Check if input_data specifies a function name
+        if "function" in input_data:
+            func_name = input_data["function"]
+        else:
+            # Try to find the main function
+            priority_names = ["main", "solve", "solution", "run", "execute"]
+            for name in priority_names:
+                if name in functions:
+                    func_name = name
+                    break
+            
+            # If no priority name, use the first function
+            if func_name is None:
+                func_name = list(functions.keys())[0]
+        
+        if func_name not in functions:
+            return None
+        
+        func = functions[func_name]
+        
+        # Prepare arguments from input_data
+        args = []
+        kwargs = {}
+        
+        # Handle 'n' parameter (common for sequence functions)
+        if "n" in input_data:
+            args.append(input_data["n"])
+        elif "input" in input_data:
+            val = input_data["input"]
+            if isinstance(val, list):
+                args.extend(val)
+            else:
+                args.append(val)
+        else:
+            # Pass all input_data as kwargs (excluding metadata fields)
+            for key, value in input_data.items():
+                if key not in ["function", "file_path"]:
+                    kwargs[key] = value
+        
+        # Execute the function
+        try:
+            if kwargs:
+                actual_result = func(**kwargs)
+            elif args:
+                actual_result = func(*args)
+            else:
+                actual_result = func()
+        except Exception as e:
+            execution_time = time.time() - start_time
+            return TestResult(
+                test_id=test_case.test_id,
+                passed=test_case.test_type == "error",
+                actual_output=str(e),
+                expected_output=test_case.expected_output,
+                error_message=str(e) if test_case.test_type != "error" else None,
+                execution_time=execution_time
+            )
+        
+        execution_time = time.time() - start_time
+        
+        # Convert result to string for comparison
+        if isinstance(actual_result, (list, dict)):
+            actual_output = json.dumps(actual_result)
+        else:
+            actual_output = str(actual_result)
+        
+        # Verify output
+        passed = verify_output(
+            actual_output,
+            test_case.expected_output,
+            test_case.test_type
+        )
+        
+        return TestResult(
+            test_id=test_case.test_id,
+            passed=passed,
+            actual_output=actual_output,
+            expected_output=test_case.expected_output,
+            execution_time=execution_time
+        )
+        
+    except Exception as e:
+        # If function execution fails, return None to try CLI mode
+        return None
+
+
+def execute_as_cli(main_file: Path, test_case: TestCase, timeout: int, start_time: float) -> TestResult:
+    """Execute test as a CLI subprocess."""
+    import time
     
     try:
         # Prepare test inputs
@@ -183,12 +326,13 @@ def execute_test(main_file: Path, test_case: TestCase, timeout: int = 10) -> Tes
         )
     
     except Exception as e:
+        import time
         return TestResult(
             test_id=test_case.test_id,
             passed=False,
             actual_output="",
             expected_output=test_case.expected_output,
-            error_message=f"Execution error: {str(e)}",
+            error_message=f"CLI execution error: {str(e)}",
             execution_time=time.time() - start_time
         )
 

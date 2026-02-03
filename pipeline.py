@@ -1,0 +1,346 @@
+"""
+Integrated Code Synthesis Pipeline
+
+This module integrates all components of the code synthesis system:
+1. Prompt Processor - Extracts problem specification from user input
+2. Code Generator - Generates code from specification
+3. Test Case Generator - Creates test cases from specification
+4. Test Executor - Runs tests against generated code
+5. Error Analyzer - Analyzes failed tests
+6. Code Repair - Fixes code based on error analysis
+
+The pipeline supports iterative refinement until all tests pass or max iterations reached.
+"""
+
+import json
+import os
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
+
+# Import all modules
+from prompt_processor import process_user_input, ProblemSpecification
+from code_generator import generate_code, write_generated_code_to_file, GeneratedCodeFile
+from test_case_generator import generate_test_cases, TestCaseCollection, TestCase
+from test_execution_verify import run_all_tests, print_summary, TestResult, find_main_file
+from error_analyser import analyze_errors
+from repair_prompt import repair_code
+
+
+@dataclass
+class PipelineConfig:
+    """Configuration for the synthesis pipeline."""
+    output_dir: str = "real"
+    max_repair_iterations: int = 3
+    model: str = "qwen3:8b"
+    verbose: bool = True
+
+
+@dataclass
+class PipelineResult:
+    """Result of a pipeline execution."""
+    success: bool
+    problem_spec: Optional[ProblemSpecification] = None
+    generated_code: Optional[GeneratedCodeFile] = None
+    test_cases: Optional[TestCaseCollection] = None
+    test_results: list[TestResult] = field(default_factory=list)
+    repair_iterations: int = 0
+    final_code: Optional[str] = None
+    error_analysis: Optional[dict] = None
+    output_file: Optional[str] = None
+
+
+def log(message: str, verbose: bool = True):
+    """Print message if verbose mode is enabled."""
+    if verbose:
+        print(message)
+
+
+def step_1_process_prompt(user_input: str, config: PipelineConfig) -> ProblemSpecification:
+    """Step 1: Process user input into structured problem specification."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 1: Processing User Input", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    spec = process_user_input(user_input)
+    
+    log(f"\nProblem Summary: {spec.problem_summary}", config.verbose)
+    log(f"Inputs: {spec.inputs}", config.verbose)
+    log(f"Outputs: {spec.outputs}", config.verbose)
+    log(f"Constraints: {spec.constraints}", config.verbose)
+    log(f"Edge Cases: {spec.edge_cases}", config.verbose)
+    log(f"Assumptions: {spec.assumptions}", config.verbose)
+    
+    return spec
+
+
+def step_2_generate_code(spec: ProblemSpecification, config: PipelineConfig) -> GeneratedCodeFile:
+    """Step 2: Generate code from problem specification."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 2: Generating Code", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    generated = generate_code(spec.model_dump())
+    
+    log(f"\nGenerated file: {generated.file_name}", config.verbose)
+    log(f"Code length: {len(generated.code)} characters", config.verbose)
+    
+    return generated
+
+
+def step_3_generate_tests(spec: ProblemSpecification, config: PipelineConfig) -> TestCaseCollection:
+    """Step 3: Generate test cases from problem specification."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 3: Generating Test Cases", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    test_cases = generate_test_cases(spec)
+    
+    log(f"\nGenerated {len(test_cases.test_cases)} test cases:", config.verbose)
+    for tc in test_cases.test_cases:
+        log(f"  - {tc.test_id}: {tc.description} ({tc.test_type})", config.verbose)
+    
+    return test_cases
+
+
+def step_4_execute_tests(
+    code: GeneratedCodeFile, 
+    test_cases: TestCaseCollection, 
+    config: PipelineConfig
+) -> list[TestResult]:
+    """Step 4: Execute tests against generated code."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 4: Executing Tests", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    # Write code to file
+    output_path = write_generated_code_to_file(code, out_dir=config.output_dir, overwrite=True)
+    log(f"\nCode written to: {output_path}", config.verbose)
+    
+    # Find the main file
+    main_file = find_main_file(config.output_dir)
+    if main_file is None:
+        log("ERROR: Could not find main file to test", config.verbose)
+        return []
+    
+    # Run tests
+    results = run_all_tests(test_cases.test_cases, main_file)
+    
+    if config.verbose:
+        print_summary(results)
+    
+    return results
+
+
+def step_5_analyze_errors(
+    code: str, 
+    failed_results: list[TestResult], 
+    config: PipelineConfig
+) -> dict:
+    """Step 5: Analyze errors from failed tests."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 5: Analyzing Errors", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    # Convert failed results to dict format for error analyzer
+    failed_tests = [
+        {
+            "test_id": r.test_id,
+            "expected": r.expected_output,
+            "actual": r.actual_output,
+            "error": r.error_message or "Output mismatch"
+        }
+        for r in failed_results
+    ]
+    
+    analysis = analyze_errors(code, failed_tests, model=config.model)
+    
+    log(f"\nError Summary: {analysis.get('error_summary', 'N/A')}", config.verbose)
+    log(f"Error Categories: {analysis.get('error_categories', [])}", config.verbose)
+    log(f"Root Causes: {analysis.get('root_causes', [])}", config.verbose)
+    
+    return analysis
+
+
+def step_6_repair_code(
+    code: str, 
+    error_analysis: dict, 
+    config: PipelineConfig
+) -> str:
+    """Step 6: Repair code based on error analysis."""
+    log("\n" + "=" * 80, config.verbose)
+    log("STEP 6: Repairing Code", config.verbose)
+    log("=" * 80, config.verbose)
+    
+    repair_result = repair_code(code, error_analysis, model=config.model)
+    repaired_code = repair_result.get("repaired_code", code)
+    
+    log(f"\nRepaired code length: {len(repaired_code)} characters", config.verbose)
+    
+    return repaired_code
+
+
+def run_pipeline(user_input: str, config: Optional[PipelineConfig] = None) -> PipelineResult:
+    """
+    Run the complete code synthesis pipeline.
+    
+    Args:
+        user_input: Natural language description of the desired program
+        config: Pipeline configuration (optional)
+    
+    Returns:
+        PipelineResult with all outputs and status
+    """
+    if config is None:
+        config = PipelineConfig()
+    
+    result = PipelineResult(success=False)
+    
+    try:
+        # Step 1: Process prompt
+        result.problem_spec = step_1_process_prompt(user_input, config)
+        
+        # Step 2: Generate code
+        result.generated_code = step_2_generate_code(result.problem_spec, config)
+        current_code = result.generated_code.code
+        current_file = result.generated_code
+        
+        # Step 3: Generate test cases
+        result.test_cases = step_3_generate_tests(result.problem_spec, config)
+        
+        # Iterative testing and repair loop
+        for iteration in range(config.max_repair_iterations + 1):
+            log(f"\n{'#' * 80}", config.verbose)
+            log(f"ITERATION {iteration + 1}", config.verbose)
+            log(f"{'#' * 80}", config.verbose)
+            
+            # Step 4: Execute tests
+            result.test_results = step_4_execute_tests(
+                current_file, 
+                result.test_cases, 
+                config
+            )
+            
+            # Check if all tests passed
+            failed_results = [r for r in result.test_results if not r.passed]
+            
+            if not failed_results:
+                log("\n✓ All tests passed!", config.verbose)
+                result.success = True
+                result.final_code = current_code
+                result.repair_iterations = iteration
+                break
+            
+            log(f"\n✗ {len(failed_results)} test(s) failed", config.verbose)
+            
+            # Don't repair on the last iteration
+            if iteration >= config.max_repair_iterations:
+                log(f"\nMax repair iterations ({config.max_repair_iterations}) reached", config.verbose)
+                result.final_code = current_code
+                result.repair_iterations = iteration
+                break
+            
+            # Step 5: Analyze errors
+            result.error_analysis = step_5_analyze_errors(
+                current_code, 
+                failed_results, 
+                config
+            )
+            
+            # Step 6: Repair code
+            repaired_code = step_6_repair_code(current_code, result.error_analysis, config)
+            
+            # Update current code for next iteration
+            current_code = repaired_code
+            current_file = GeneratedCodeFile(
+                file_name=result.generated_code.file_name,
+                code=repaired_code
+            )
+        
+        # Write final code to output
+        result.output_file = write_generated_code_to_file(
+            GeneratedCodeFile(
+                file_name=result.generated_code.file_name,
+                code=result.final_code or current_code
+            ),
+            out_dir=config.output_dir,
+            overwrite=True
+        )
+        
+    except Exception as e:
+        log(f"\nERROR: Pipeline failed with exception: {str(e)}", config.verbose)
+        import traceback
+        traceback.print_exc()
+    
+    return result
+
+
+def print_pipeline_result(result: PipelineResult):
+    """Print a summary of the pipeline result."""
+    print("\n" + "=" * 80)
+    print("PIPELINE RESULT SUMMARY")
+    print("=" * 80)
+    
+    print(f"\nStatus: {'SUCCESS ✓' if result.success else 'FAILED ✗'}")
+    print(f"Repair iterations: {result.repair_iterations}")
+    
+    if result.test_results:
+        passed = sum(1 for r in result.test_results if r.passed)
+        total = len(result.test_results)
+        print(f"Tests: {passed}/{total} passed")
+    
+    if result.output_file:
+        print(f"Output file: {result.output_file}")
+    
+    if result.error_analysis and not result.success:
+        print(f"\nLast Error Analysis:")
+        print(f"  Summary: {result.error_analysis.get('error_summary', 'N/A')}")
+        print(f"  Root Causes: {result.error_analysis.get('root_causes', [])}")
+
+
+def main():
+    """Interactive usage of the integrated pipeline."""
+    import sys
+    
+    # Get user input - either from command line or interactively
+    if len(sys.argv) > 1:
+        # User provided input as command line argument
+        user_input = " ".join(sys.argv[1:])
+    else:
+        # Interactive mode - ask user for input
+        print("=" * 80)
+        print("CODE SYNTHESIS PIPELINE")
+        print("=" * 80)
+        print("\nDescribe the program you want to create:")
+        user_input = input("> ").strip()
+        
+        if not user_input:
+            print("No input provided. Exiting.")
+            return
+    
+    print(f"\nUser Request: {user_input}")
+    
+    # Configure the pipeline
+    config = PipelineConfig(
+        output_dir="real",
+        max_repair_iterations=3,
+        model="qwen3:8b",
+        verbose=True
+    )
+    
+    # Run the pipeline
+    result = run_pipeline(user_input, config)
+    
+    # Print summary
+    print_pipeline_result(result)
+    
+    # Show final code
+    if result.final_code:
+        print("\n" + "=" * 80)
+        print("FINAL CODE")
+        print("=" * 80)
+        print(result.final_code)
+
+
+if __name__ == "__main__":
+    main()
