@@ -100,6 +100,78 @@ def build_chain(*, system_prompt: str = SYSTEM_PROMPT) -> tuple[object, Pydantic
     return chain, parser
 
 
+def normalize_test_case(tc_data: dict) -> dict:
+    """Normalize a test case dict to have required fields.
+    
+    Handles common LLM mistakes like using 'id' instead of 'test_id'.
+    """
+    normalized = tc_data.copy()
+    
+    # Fix 'id' -> 'test_id'
+    if 'id' in normalized and 'test_id' not in normalized:
+        normalized['test_id'] = normalized.pop('id')
+    
+    # Default test_id if missing
+    if 'test_id' not in normalized:
+        normalized['test_id'] = f"TC{id(normalized) % 1000:03d}"
+    
+    # Default test_type based on description/content if missing
+    if 'test_type' not in normalized:
+        desc = normalized.get('description', '').lower()
+        expected = normalized.get('expected_output', '').lower()
+        
+        # Infer test type from description or expected output
+        if any(word in desc for word in ['error', 'invalid', 'fail', 'exception', 'negative']):
+            normalized['test_type'] = 'error'
+        elif any(word in desc for word in ['edge', 'boundary', 'empty', 'zero', 'max', 'min', 'limit']):
+            normalized['test_type'] = 'edge_case'
+        elif any(word in expected for word in ['error', '-1', 'none', 'null', 'invalid']):
+            normalized['test_type'] = 'edge_case'
+        else:
+            normalized['test_type'] = 'normal'
+    
+    # Ensure other required fields have defaults
+    if 'description' not in normalized:
+        normalized['description'] = 'Test case'
+    if 'input_data' not in normalized:
+        normalized['input_data'] = {}
+    if 'expected_output' not in normalized:
+        normalized['expected_output'] = ''
+    if 'validation_criteria' not in normalized:
+        normalized['validation_criteria'] = 'Verify expected output matches actual output'
+    
+    return normalized
+
+
+def parse_test_cases(raw_content: str | dict) -> TestCaseCollection:
+    """Parse test cases from raw LLM output with fallback handling."""
+    import re
+    
+    # Extract JSON if needed
+    if isinstance(raw_content, str):
+        # Try to extract JSON object
+        raw_content = raw_content.strip()
+        match = re.search(r'\{.*\}', raw_content, flags=re.DOTALL)
+        if match:
+            raw_content = match.group(0)
+        data = json.loads(raw_content)
+    else:
+        data = raw_content
+    
+    # Get test cases list
+    if 'test_cases' in data:
+        test_cases_raw = data['test_cases']
+    else:
+        test_cases_raw = data if isinstance(data, list) else [data]
+    
+    # Normalize each test case
+    normalized_cases = [normalize_test_case(tc) for tc in test_cases_raw]
+    
+    # Create collection
+    test_cases = [TestCase.model_validate(tc) for tc in normalized_cases]
+    return TestCaseCollection(test_cases=test_cases)
+
+
 def generate_test_cases(problem_spec: dict | BaseModel) -> TestCaseCollection:
     """Generate test cases from a problem specification.
     
@@ -109,7 +181,12 @@ def generate_test_cases(problem_spec: dict | BaseModel) -> TestCaseCollection:
     Returns:
         TestCaseCollection with generated test cases
     """
-    chain, parser = build_chain()
+    parser = build_parser()
+    prompt = build_prompt_template(SYSTEM_PROMPT)
+    model = build_model()
+    
+    # Build chain without parser - we'll parse manually for better error handling
+    chain = prompt | model
     
     # Convert to dict if it's a Pydantic model
     if hasattr(problem_spec, "model_dump"):
@@ -117,12 +194,21 @@ def generate_test_cases(problem_spec: dict | BaseModel) -> TestCaseCollection:
     else:
         spec_dict = problem_spec
     
-    result: TestCaseCollection = chain.invoke(
+    raw_result = chain.invoke(
         {
             "problem_spec": json.dumps(spec_dict, indent=2, ensure_ascii=False),
             "format_instructions": parser.get_format_instructions(),
         }
     )
+    
+    # Extract content from the response
+    if hasattr(raw_result, 'content'):
+        content = raw_result.content
+    else:
+        content = str(raw_result)
+    
+    # Parse with fallback handling
+    result = parse_test_cases(content)
     
     return result
 

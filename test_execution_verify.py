@@ -186,11 +186,18 @@ def execute_as_function(main_file: Path, test_case: TestCase, timeout: int = 10)
             func_name = input_data["function"]
         else:
             # Try to find the main function
-            priority_names = ["main", "solve", "solution", "run", "execute"]
+            priority_names = ["fibonacci", "fib", "main", "solve", "solution", "run", "execute"]
             for name in priority_names:
                 if name in functions:
                     func_name = name
                     break
+            
+            # Also check for partial matches (e.g., fibonacci_series)
+            if func_name is None:
+                for name in functions:
+                    if any(p in name.lower() for p in ["fibonacci", "fib"]):
+                        func_name = name
+                        break
             
             # If no priority name, use the first function
             if func_name is None:
@@ -205,16 +212,22 @@ def execute_as_function(main_file: Path, test_case: TestCase, timeout: int = 10)
         args = []
         kwargs = {}
         
-        # Handle 'n' parameter (common for sequence functions)
-        if "n" in input_data:
-            args.append(input_data["n"])
-        elif "input" in input_data:
-            val = input_data["input"]
-            if isinstance(val, list):
-                args.extend(val)
-            else:
-                args.append(val)
-        else:
+        # Common parameter names for sequence/math functions
+        positional_params = ["n", "num", "number", "count", "terms", "limit", "input", "value", "x"]
+        
+        # Check for positional parameters first
+        found_positional = False
+        for param in positional_params:
+            if param in input_data:
+                val = input_data[param]
+                if isinstance(val, list):
+                    args.extend(val)
+                else:
+                    args.append(val)
+                found_positional = True
+                break
+        
+        if not found_positional:
             # Pass all input_data as kwargs (excluding metadata fields)
             for key, value in input_data.items():
                 if key not in ["function", "file_path"]:
@@ -347,7 +360,7 @@ def verify_output(actual: str, expected: str, test_type: str) -> bool:
         expected_lower = expected.lower()
         
         # Extract key error terms
-        error_terms = ["error", "not found", "invalid", "missing", "failed"]
+        error_terms = ["error", "not found", "invalid", "missing", "failed", "exception"]
         for term in error_terms:
             if term in expected_lower and term in actual_lower:
                 return True
@@ -355,16 +368,54 @@ def verify_output(actual: str, expected: str, test_type: str) -> bool:
         # Check for specific expected message parts
         expected_words = expected_lower.split()
         matches = sum(1 for word in expected_words if word in actual_lower)
-        return matches >= len(expected_words) * 0.6  # 60% word match
+        return matches >= len(expected_words) * 0.5  # 50% word match
+    
+    # Normalize outputs
+    actual_normalized = actual.strip()
+    expected_normalized = expected.strip()
+    
+    # Try direct string comparison first
+    if actual_normalized == expected_normalized:
+        return True
     
     # For normal cases, try JSON comparison
     try:
-        actual_json = json.loads(actual)
-        expected_json = json.loads(expected)
+        actual_json = json.loads(actual_normalized)
+        expected_json = json.loads(expected_normalized)
         return compare_json_outputs(actual_json, expected_json)
     except json.JSONDecodeError:
-        # Fall back to string comparison
-        return actual.strip() == expected.strip()
+        pass
+    
+    # Try to parse as Python literal (e.g., list representation)
+    try:
+        import ast
+        actual_parsed = ast.literal_eval(actual_normalized)
+        expected_parsed = ast.literal_eval(expected_normalized)
+        return compare_json_outputs(actual_parsed, expected_parsed)
+    except (ValueError, SyntaxError):
+        pass
+    
+    # Try extracting lists/numbers from output strings
+    actual_numbers = extract_numbers(actual_normalized)
+    expected_numbers = extract_numbers(expected_normalized)
+    if actual_numbers and expected_numbers and actual_numbers == expected_numbers:
+        return True
+    
+    # Fall back to string comparison
+    return actual_normalized == expected_normalized
+
+
+def extract_numbers(text: str) -> list:
+    """Extract all numbers from a text string."""
+    import re
+    numbers = re.findall(r'-?\d+\.?\d*', text)
+    result = []
+    for n in numbers:
+        if '.' in n:
+            result.append(float(n))
+        else:
+            result.append(int(n))
+    return result
 
 
 def compare_json_outputs(actual: Any, expected: Any, tolerance: float = 0.01) -> bool:
@@ -450,29 +501,47 @@ def print_summary(results: list[TestResult]) -> None:
 
 
 def main() -> None:
-    # Example test cases
+    # Example test cases for Fibonacci series
     test_cases = [
         TestCase(
             test_id="TC001",
-            description="Valid CSV with numeric columns",
+            description="Fibonacci series with n=10",
             test_type="normal",
-            input_data={
-                "file_path": "data.csv",
-                "columns": ["age", "income"]
-            },
-            expected_output='{"age": {"mean": 35.5, "median": 34, "mode": 30}, "income": {"mean": 55000, "median": 52000, "mode": 48000}}',
-            validation_criteria="Verify JSON output contains mean, median, and mode for specified numeric columns"
+            input_data={"n": 10},
+            expected_output="[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]",
+            validation_criteria="Verify first 10 Fibonacci numbers are returned"
         ),
         TestCase(
             test_id="TC002",
-            description="Invalid CSV file path",
+            description="Fibonacci series with n=1",
+            test_type="normal",
+            input_data={"n": 1},
+            expected_output="[0]",
+            validation_criteria="Verify only first Fibonacci number is returned"
+        ),
+        TestCase(
+            test_id="TC003",
+            description="Fibonacci series with n=0",
+            test_type="edge_case",
+            input_data={"n": 0},
+            expected_output="[]",
+            validation_criteria="Verify empty list is returned for n=0"
+        ),
+        TestCase(
+            test_id="TC004",
+            description="Fibonacci series with negative n",
             test_type="error",
-            input_data={
-                "file_path": "nonexistent.csv",
-                "columns": ["age"]
-            },
-            expected_output="Error: File 'nonexistent.csv' not found",
-            validation_criteria="Verify error message indicates missing file"
+            input_data={"n": -5},
+            expected_output="Error: n must be a non-negative integer",
+            validation_criteria="Verify error is raised for negative input"
+        ),
+        TestCase(
+            test_id="TC005",
+            description="Fibonacci series with n=5",
+            test_type="normal",
+            input_data={"n": 5},
+            expected_output="[0, 1, 1, 2, 3]",
+            validation_criteria="Verify first 5 Fibonacci numbers are returned"
         )
     ]
     

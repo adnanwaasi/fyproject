@@ -78,12 +78,18 @@ def parse_generated_code(payload: str | dict[str, Any]) -> GeneratedCodeFile:
 	Accepts either:
 	- a dict like {"file_name": "main.py", "code": "..."}
 	- a string containing that JSON (even if it has extra text around it)
+	
+	If file_name is missing, defaults to "main.py".
 	"""
 	if isinstance(payload, dict):
-		data = payload
+		data = payload.copy()
 	else:
 		json_text = _extract_first_json_object(payload)
 		data = json.loads(json_text)
+
+	# Provide default file_name if missing
+	if "file_name" not in data or not data.get("file_name"):
+		data["file_name"] = "main.py"
 
 	generated = GeneratedCodeFile.model_validate(data)
 	generated.code = _strip_markdown_fences(generated.code)
@@ -170,14 +176,33 @@ def build_chain(*, system_prompt: str = SYSTEM_PROMPT) -> tuple[object, Pydantic
 
 
 def generate_code(problem_spec: dict) -> GeneratedCodeFile:
-	chain, parser = build_chain()
-	result: GeneratedCodeFile = chain.invoke(
+	"""Generate code from problem specification.
+	
+	Uses LLM to generate code, with fallback handling for missing fields.
+	"""
+	parser = build_parser()
+	prompt = build_prompt_template(SYSTEM_PROMPT)
+	model = build_model()
+	
+	# Build chain without parser - we'll parse manually for better error handling
+	chain = prompt | model
+	
+	raw_result = chain.invoke(
 		{
 			"problem_spec_json": json.dumps(problem_spec, indent=2, ensure_ascii=False),
 			"format_instructions": parser.get_format_instructions(),
 		}
 	)
-
+	
+	# Extract content from the response
+	if hasattr(raw_result, 'content'):
+		content = raw_result.content
+	else:
+		content = str(raw_result)
+	
+	# Parse with fallback for missing file_name
+	result = parse_generated_code(content)
+	
 	# Extra safety: ensure no accidental Markdown fences leak through.
 	result.code = _strip_markdown_fences(result.code)
 	return result
