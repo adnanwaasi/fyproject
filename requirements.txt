@@ -1,3 +1,5 @@
 pydantic>=2
 langchain-core
 langchain-ollama
+fastapi
+uvicorn[standard]
