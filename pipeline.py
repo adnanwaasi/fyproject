@@ -43,8 +43,8 @@ class PipelineConfig:
     """Configuration for the synthesis pipeline."""
 
     output_dir: str = "real"
-    max_repair_iterations: int = 3
-    model: str = "qwen3:8b"
+    max_repair_iterations: int = 2
+    model: str = "openai/gpt-oss-20b"
     verbose: bool = True
 
 
@@ -428,7 +428,10 @@ def main():
 
     # Configure the pipeline
     config = PipelineConfig(
-        output_dir="real", max_repair_iterations=3, model="qwen3:8b", verbose=True
+        output_dir="real",
+        max_repair_iterations=2,
+        model="llama-3.1-8b-instant",
+        verbose=True,
     )
 
     # Run the pipeline

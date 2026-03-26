@@ -2,9 +2,10 @@ import json
 from typing import List
 
 from pydantic import BaseModel
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+
+from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
 
 
 RAW_SYSTEM_PROMPT = """You are a Test Case Generator for a code synthesis system.
@@ -42,6 +43,12 @@ Output format:
         }}
     ]
 }}
+
+IMPORTANT:
+- Output MUST be a single JSON object and nothing else.
+- Do NOT use Markdown. Do NOT include ``` fences.
+- The entire response must be valid JSON that can be parsed by Python's json.loads().
+- Escape special characters in strings appropriately for JSON.
 """
 
 
@@ -51,7 +58,7 @@ SYSTEM_PROMPT = RAW_SYSTEM_PROMPT.replace("{", "{{").replace("}", "}}")
 class TestCase(BaseModel):
     test_id: str
     description: str
-    test_type: str  # normal, edge_case, error
+    test_type: str
     input_data: dict
     expected_output: str
     validation_criteria: str
@@ -83,169 +90,128 @@ def build_prompt_template(system_prompt: str) -> ChatPromptTemplate:
     )
 
 
-def build_model(*, model_name: str = "qwen3:8b", temperature: float = 0.3) -> ChatOllama:
-    return ChatOllama(
-        model=model_name,
-        validate_model_on_init=True,
-        format="json",
-        temperature=temperature,
-    )
-
-
-def build_chain(*, system_prompt: str = SYSTEM_PROMPT) -> tuple[object, PydanticOutputParser]:
-    parser = build_parser()
-    prompt = build_prompt_template(system_prompt)
-    model = build_model()
-    chain = prompt | model | parser
-    return chain, parser
-
-
 def normalize_test_case(tc_data: dict) -> dict:
-    """Normalize a test case dict to have required fields.
-    
-    Handles common LLM mistakes like using 'id' instead of 'test_id'.
-    """
     normalized = tc_data.copy()
-    
-    # Fix 'id' -> 'test_id'
-    if 'id' in normalized and 'test_id' not in normalized:
-        normalized['test_id'] = normalized.pop('id')
-    
-    # Default test_id if missing
-    if 'test_id' not in normalized:
-        normalized['test_id'] = f"TC{id(normalized) % 1000:03d}"
-    
-    # Default test_type based on description/content if missing
-    if 'test_type' not in normalized:
-        desc = normalized.get('description', '').lower()
-        expected = normalized.get('expected_output', '').lower()
-        
-        # Infer test type from description or expected output
-        if any(word in desc for word in ['error', 'invalid', 'fail', 'exception', 'negative']):
-            normalized['test_type'] = 'error'
-        elif any(word in desc for word in ['edge', 'boundary', 'empty', 'zero', 'max', 'min', 'limit']):
-            normalized['test_type'] = 'edge_case'
-        elif any(word in expected for word in ['error', '-1', 'none', 'null', 'invalid']):
-            normalized['test_type'] = 'edge_case'
+
+    if "id" in normalized and "test_id" not in normalized:
+        normalized["test_id"] = normalized.pop("id")
+
+    if "test_id" not in normalized:
+        normalized["test_id"] = f"TC{id(normalized) % 1000:03d}"
+
+    if "test_type" not in normalized:
+        desc = normalized.get("description", "").lower()
+        expected = normalized.get("expected_output", "").lower()
+
+        if any(
+            word in desc
+            for word in ["error", "invalid", "fail", "exception", "negative"]
+        ):
+            normalized["test_type"] = "error"
+        elif any(
+            word in desc
+            for word in ["edge", "boundary", "empty", "zero", "max", "min", "limit"]
+        ):
+            normalized["test_type"] = "edge_case"
+        elif any(
+            word in expected for word in ["error", "-1", "none", "null", "invalid"]
+        ):
+            normalized["test_type"] = "edge_case"
         else:
-            normalized['test_type'] = 'normal'
-    
-    # Ensure other required fields have defaults
-    if 'description' not in normalized:
-        normalized['description'] = 'Test case'
-    if 'input_data' not in normalized:
-        normalized['input_data'] = {}
-    if 'expected_output' not in normalized:
-        normalized['expected_output'] = ''
-    if 'validation_criteria' not in normalized:
-        normalized['validation_criteria'] = 'Verify expected output matches actual output'
-    
+            normalized["test_type"] = "normal"
+
+    if "description" not in normalized:
+        normalized["description"] = "Test case"
+    if "input_data" not in normalized:
+        normalized["input_data"] = {}
+    if "expected_output" not in normalized:
+        normalized["expected_output"] = ""
+    if "validation_criteria" not in normalized:
+        normalized["validation_criteria"] = (
+            "Verify expected output matches actual output"
+        )
+
     return normalized
 
 
 def parse_test_cases(raw_content: str | dict) -> TestCaseCollection:
-    """Parse test cases from raw LLM output with fallback handling."""
     import re
-    
-    # Extract JSON if needed
+
     if isinstance(raw_content, str):
-        # Try to extract JSON object
         raw_content = raw_content.strip()
-        match = re.search(r'\{.*\}', raw_content, flags=re.DOTALL)
+        match = re.search(r"\{.*\}", raw_content, flags=re.DOTALL)
         if match:
             raw_content = match.group(0)
         data = json.loads(raw_content)
     else:
         data = raw_content
-    
-    # Get test cases list
-    if 'test_cases' in data:
-        test_cases_raw = data['test_cases']
+
+    if "test_cases" in data:
+        test_cases_raw = data["test_cases"]
     else:
         test_cases_raw = data if isinstance(data, list) else [data]
-    
-    # Normalize each test case
+
     normalized_cases = [normalize_test_case(tc) for tc in test_cases_raw]
-    
-    # Create collection
     test_cases = [TestCase.model_validate(tc) for tc in normalized_cases]
     return TestCaseCollection(test_cases=test_cases)
 
 
-def generate_test_cases(problem_spec: dict | BaseModel) -> TestCaseCollection:
-    """Generate test cases from a problem specification.
-    
-    Args:
-        problem_spec: Either a dict or ProblemSpecification object
-    
-    Returns:
-        TestCaseCollection with generated test cases
-    """
+def generate_test_cases(
+    problem_spec: dict | BaseModel, model_name: str = DEFAULT_MODEL
+) -> TestCaseCollection:
     parser = build_parser()
     prompt = build_prompt_template(SYSTEM_PROMPT)
-    model = build_model()
-    
-    # Build chain without parser - we'll parse manually for better error handling
-    chain = prompt | model
-    
-    # Convert to dict if it's a Pydantic model
-    if hasattr(problem_spec, "model_dump"):
-        spec_dict = problem_spec.model_dump()
-    else:
-        spec_dict = problem_spec
-    
-    raw_result = chain.invoke(
-        {
-            "problem_spec": json.dumps(spec_dict, indent=2, ensure_ascii=False),
-            "format_instructions": parser.get_format_instructions(),
-        }
+    model = build_groq_model(model_name=model_name, json_mode=True)
+
+    spec_dict = (
+        problem_spec.model_dump()
+        if hasattr(problem_spec, "model_dump")
+        else problem_spec
     )
-    
-    # Extract content from the response
-    if hasattr(raw_result, 'content'):
-        content = raw_result.content
-    else:
-        content = str(raw_result)
-    
-    # Parse with fallback handling
-    result = parse_test_cases(content)
-    
-    return result
+
+    messages = prompt.format_messages(
+        problem_spec=json.dumps(spec_dict, indent=2, ensure_ascii=False),
+        format_instructions=parser.get_format_instructions(),
+    )
+    raw_result = invoke_with_retry(model, messages)
+    content: str = (
+        raw_result.content if hasattr(raw_result, "content") else str(raw_result)
+    )
+    return parse_test_cases(content)
 
 
 def main() -> None:
-    # Example problem specification
     example_spec = {
         "problem_summary": "Build a CLI tool to read a CSV file and compute summary statistics (mean, median, mode) for specified columns, handling missing values and allowing column selection via command-line arguments.",
         "inputs": [
             "CSV file path",
-            "List of column names to analyze (specified via command-line arguments)"
+            "List of column names to analyze (specified via command-line arguments)",
         ],
         "outputs": [
             "JSON-formatted summary statistics for each specified column (mean, median, mode)",
-            "Error messages for invalid inputs or processing issues"
+            "Error messages for invalid inputs or processing issues",
         ],
         "constraints": [
             "Gracefully handle missing values in the dataset",
             "Support statistical calculations only for numeric columns",
-            "Allow dynamic column selection via command-line arguments"
+            "Allow dynamic column selection via command-line arguments",
         ],
         "edge_cases": [
             "Missing or invalid CSV file path",
             "Specified columns do not exist in the CSV",
             "Non-numeric data in columns requiring numerical operations",
-            "All values in a column are missing"
+            "All values in a column are missing",
         ],
         "assumptions": [
             "The CSV file uses standard formatting with headers",
             "Command-line arguments for columns are valid strings",
             "The tool is used in an environment supporting CLI arguments",
-            "The user intends to analyze numeric columns for statistical calculations"
-        ]
+            "The user intends to analyze numeric columns for statistical calculations",
+        ],
     }
-    
+
     test_cases = generate_test_cases(example_spec)
-    
+
     print("Generated Test Cases:")
     print("=" * 80)
     for tc in test_cases.test_cases:
@@ -255,8 +221,7 @@ def main() -> None:
         print(f"Expected: {tc.expected_output}")
         print(f"Validation: {tc.validation_criteria}")
         print("-" * 80)
-    
-    # Also output as JSON
+
     print("\n\nJSON Output:")
     print(test_cases.model_dump_json(indent=2))
 

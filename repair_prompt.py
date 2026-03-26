@@ -1,7 +1,8 @@
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
 import re
+
+from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
 
 
 SYSTEM_PROMPT = """You are a Code Repair Agent.
@@ -32,7 +33,6 @@ Output format:
 
 
 def _extract_json_from_response(response_text: str) -> str:
-    """Extract JSON from model response, handling markdown code blocks."""
     if "```json" in response_text:
         json_start = response_text.find("```json") + 7
         json_end = response_text.find("```", json_start)
@@ -42,15 +42,13 @@ def _extract_json_from_response(response_text: str) -> str:
         json_end = response_text.find("```", json_start)
         return response_text[json_start:json_end].strip()
     else:
-        # Try to find JSON object directly
-        match = re.search(r'\{.*\}', response_text, flags=re.DOTALL)
+        match = re.search(r"\{.*\}", response_text, flags=re.DOTALL)
         if match:
             return match.group(0)
         return response_text.strip()
 
 
 def _strip_markdown_fences(code: str) -> str:
-    """Remove markdown code fences from code if present."""
     code = code.strip()
     if code.startswith("```"):
         code = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", code)
@@ -58,20 +56,9 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
-def repair_code(code: str, error_analysis: dict, model: str = "qwen3:8b") -> dict:
-    """
-    Repair buggy code based on error analysis.
-    
-    Args:
-        code: The original buggy source code
-        error_analysis: Dictionary containing error_summary, error_categories, and root_causes
-        model: Ollama model to use for code repair
-    
-    Returns:
-        Dictionary containing the repaired_code
-    """
-    llm = ChatOllama(model=model)
-    
+def repair_code(code: str, error_analysis: dict, model: str = DEFAULT_MODEL) -> dict:
+    llm = build_groq_model(model_name=model)
+
     user_message = f"""Original Code:
 ```
 {code}
@@ -84,55 +71,53 @@ Please fix the code based on the error analysis and provide the repaired code in
 
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=user_message)
+        HumanMessage(content=user_message),
     ]
-    
-    response = llm.invoke(messages)
-    response_text = response.content
-    
-    # Try to parse JSON from the response
+
+    response = invoke_with_retry(llm, messages)
+    response_text: str = (
+        response.content if hasattr(response, "content") else str(response)
+    )
+
     try:
         json_str = _extract_json_from_response(response_text)
         result = json.loads(json_str)
-        
-        # Clean up the repaired code if present
+
         if "repaired_code" in result:
             result["repaired_code"] = _strip_markdown_fences(result["repaired_code"])
-            
+
     except json.JSONDecodeError:
-        # If JSON parsing fails, try to extract code directly
-        code_match = re.search(r'```python\n(.*?)```', response_text, flags=re.DOTALL)
+        code_match = re.search(r"```python\n(.*?)```", response_text, flags=re.DOTALL)
         if code_match:
             result = {"repaired_code": code_match.group(1).strip()}
         else:
             result = {
                 "repaired_code": response_text,
-                "parse_error": "Could not parse JSON from model response"
+                "parse_error": "Could not parse JSON from model response",
             }
-    
+
     return result
 
 
 if __name__ == "__main__":
-    # Example usage
     sample_code = """
 def add(a, b):
     return a - b  # Bug: should be a + b
 """
-    
+
     sample_error_analysis = {
         "error_summary": "The function incorrectly subtracts parameters instead of adding them, leading to incorrect results.",
         "error_categories": ["logic error"],
-        "root_causes": ["Incorrect operator usage (subtraction instead of addition)"]
+        "root_causes": ["Incorrect operator usage (subtraction instead of addition)"],
     }
-    
+
     print("Original Code:")
     print(sample_code)
     print("\nError Analysis:")
     print(json.dumps(sample_error_analysis, indent=2))
     print("\nRepairing code...")
-    
+
     result = repair_code(sample_code, sample_error_analysis)
-    
+
     print("\nRepair Result:")
     print(json.dumps(result, indent=2))

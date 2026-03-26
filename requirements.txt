@@ -1,5 +1,6 @@
 pydantic>=2
 langchain-core
-langchain-ollama
+langchain-groq
 fastapi
 uvicorn[standard]
+tenacity
