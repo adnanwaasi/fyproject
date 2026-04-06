@@ -1,14 +1,13 @@
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-
-from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
+from langchain_ollama import ChatOllama
 
 
 RAW_SYSTEM_PROMPT = """You are a Code Generator.
@@ -39,6 +38,8 @@ Output format:
 """
 
 
+# LangChain prompt templates treat `{...}` as variables, so we escape braces to
+# avoid accidental interpolation if the prompt ever contains JSON examples.
 SYSTEM_PROMPT = RAW_SYSTEM_PROMPT.replace("{", "{{").replace("}", "}}")
 
 
@@ -52,6 +53,7 @@ def build_parser() -> PydanticOutputParser:
 
 
 def _extract_first_json_object(text: str) -> str:
+    """Best-effort: extract the first top-level JSON object from text."""
     text = text.strip()
     if text.startswith("{") and text.endswith("}"):
         return text
@@ -71,12 +73,21 @@ def _strip_markdown_fences(code: str) -> str:
 
 
 def parse_generated_code(payload: str | dict[str, Any]) -> GeneratedCodeFile:
+    """Parse a generated output payload into a `GeneratedCodeFile`.
+
+    Accepts either:
+    - a dict like {"file_name": "main.py", "code": "..."}
+    - a string containing that JSON (even if it has extra text around it)
+
+    If file_name is missing, defaults to "main.py".
+    """
     if isinstance(payload, dict):
         data = payload.copy()
     else:
         json_text = _extract_first_json_object(payload)
         data = json.loads(json_text)
 
+    # Provide default file_name if missing
     if "file_name" not in data or not data.get("file_name"):
         data["file_name"] = "main.py"
 
@@ -91,6 +102,10 @@ def write_generated_code_to_file(
     out_dir: str = ".",
     overwrite: bool = True,
 ) -> str:
+    """Write `generated.code` into `out_dir/generated.file_name`.
+
+    Returns the absolute path of the written file.
+    """
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.abspath(os.path.join(out_dir, generated.file_name))
 
@@ -117,6 +132,7 @@ def parse_and_write_generated_code(
     out_dir: str = ".",
     overwrite: bool = True,
 ) -> str:
+    """Convenience: parse payload then write it to disk."""
     generated = parse_generated_code(payload)
     return write_generated_code_to_file(generated, out_dir=out_dir, overwrite=overwrite)
 
@@ -131,32 +147,67 @@ def build_prompt_template(system_prompt: str) -> ChatPromptTemplate:
                 "IMPORTANT:\n"
                 "- Output MUST be a single JSON object and nothing else.\n"
                 "- Do NOT use Markdown. Do NOT include ``` fences.\n"
-                "- The `code` field must contain plain code text with proper JSON escaping:\n"
-                '  * Use \\\\n for newlines, \\\\t for tabs, \\\\" for double quotes, \\\\\\\\ for backslashes\n'
-                "- Do NOT include unescaped newlines or quotes within the code string.\n"
-                "- The entire response must be valid JSON that can be parsed by Python's json.loads().\n",
+                "- The `code` field must contain plain code text.\n",
             ),
         ]
     )
 
 
-def generate_code(
-    problem_spec: dict, model_name: str = DEFAULT_MODEL
-) -> GeneratedCodeFile:
+def build_model(
+    *,
+    model_name: str = "gemma4:e4b",
+    temperature: float = 0.0,
+    output_format: Literal["", "json"] | None = "json",
+) -> ChatOllama:
+    return ChatOllama(
+        model=model_name,
+        validate_model_on_init=True,
+        format=output_format,
+        temperature=temperature,
+    )
+
+
+def build_chain(
+    *, system_prompt: str = SYSTEM_PROMPT
+) -> tuple[object, PydanticOutputParser]:
+    parser = build_parser()
+    prompt = build_prompt_template(system_prompt)
+    model = build_model()
+    chain = prompt | model | parser
+    return chain, parser
+
+
+def generate_code(problem_spec: dict) -> GeneratedCodeFile:
+    """Generate code from problem specification.
+
+    Uses LLM to generate code, with fallback handling for missing fields.
+    """
     parser = build_parser()
     prompt = build_prompt_template(SYSTEM_PROMPT)
-    model = build_groq_model(model_name=model_name, json_mode=True)
+    model = build_model()
 
-    messages = prompt.format_messages(
-        problem_spec_json=json.dumps(problem_spec, indent=2, ensure_ascii=False),
-        format_instructions=parser.get_format_instructions(),
-    )
-    raw_result = invoke_with_retry(model, messages)
-    content: str = (
-        raw_result.content if hasattr(raw_result, "content") else str(raw_result)
+    # Build chain without parser - we'll parse manually for better error handling
+    chain = prompt | model
+
+    raw_result = chain.invoke(
+        {
+            "problem_spec_json": json.dumps(problem_spec, indent=2, ensure_ascii=False),
+            "format_instructions": parser.get_format_instructions(),
+        }
     )
 
+    content_raw = raw_result.content if hasattr(raw_result, "content") else raw_result
+    if isinstance(content_raw, list):
+        content = "\n".join(
+            item if isinstance(item, str) else str(item) for item in content_raw
+        )
+    else:
+        content = str(content_raw)
+
+    # Parse with fallback for missing file_name
     result = parse_generated_code(content)
+
+    # Extra safety: ensure no accidental Markdown fences leak through.
     result.code = _strip_markdown_fences(result.code)
     return result
 
@@ -185,6 +236,7 @@ def main() -> None:
     result = generate_code(example_problem_spec)
     print(result.model_dump_json(indent=2))
 
+    # Write the generated code to disk
     output_path = write_generated_code_to_file(result, out_dir="real", overwrite=True)
     print(f"\n✓ Wrote generated code to: {output_path}")
 

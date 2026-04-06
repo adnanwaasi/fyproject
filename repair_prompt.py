@@ -1,8 +1,7 @@
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
 import re
-
-from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
 
 
 SYSTEM_PROMPT = """You are a Code Repair Agent.
@@ -33,6 +32,7 @@ Output format:
 
 
 def _extract_json_from_response(response_text: str) -> str:
+    """Extract JSON from model response, handling markdown code blocks."""
     if "```json" in response_text:
         json_start = response_text.find("```json") + 7
         json_end = response_text.find("```", json_start)
@@ -42,6 +42,7 @@ def _extract_json_from_response(response_text: str) -> str:
         json_end = response_text.find("```", json_start)
         return response_text[json_start:json_end].strip()
     else:
+        # Try to find JSON object directly
         match = re.search(r"\{.*\}", response_text, flags=re.DOTALL)
         if match:
             return match.group(0)
@@ -49,6 +50,7 @@ def _extract_json_from_response(response_text: str) -> str:
 
 
 def _strip_markdown_fences(code: str) -> str:
+    """Remove markdown code fences from code if present."""
     code = code.strip()
     if code.startswith("```"):
         code = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", code)
@@ -56,8 +58,19 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
-def repair_code(code: str, error_analysis: dict, model: str = DEFAULT_MODEL) -> dict:
-    llm = build_groq_model(model_name=model)
+def repair_code(code: str, error_analysis: dict, model: str = "gemma4:e4b") -> dict:
+    """
+    Repair buggy code based on error analysis.
+
+    Args:
+        code: The original buggy source code
+        error_analysis: Dictionary containing error_summary, error_categories, and root_causes
+        model: Ollama model to use for code repair
+
+    Returns:
+        Dictionary containing the repaired_code
+    """
+    llm = ChatOllama(model=model)
 
     user_message = f"""Original Code:
 ```
@@ -74,19 +87,28 @@ Please fix the code based on the error analysis and provide the repaired code in
         HumanMessage(content=user_message),
     ]
 
-    response = invoke_with_retry(llm, messages)
-    response_text: str = (
-        response.content if hasattr(response, "content") else str(response)
-    )
+    response = llm.invoke(messages)
+    content_raw = response.content if hasattr(response, "content") else response
+    if isinstance(content_raw, list):
+        response_text = "\n".join(
+            item if isinstance(item, str) else str(item) for item in content_raw
+        )
+    else:
+        response_text = str(content_raw)
 
+    # Try to parse JSON from the response
     try:
         json_str = _extract_json_from_response(response_text)
         result = json.loads(json_str)
 
+        # Clean up the repaired code if present
         if "repaired_code" in result:
-            result["repaired_code"] = _strip_markdown_fences(result["repaired_code"])
+            code_val = result["repaired_code"]
+            # If it's a string with escaped newlines, json.loads already handles it
+            result["repaired_code"] = _strip_markdown_fences(code_val)
 
     except json.JSONDecodeError:
+        # If JSON parsing fails, try to extract code directly
         code_match = re.search(r"```python\n(.*?)```", response_text, flags=re.DOTALL)
         if code_match:
             result = {"repaired_code": code_match.group(1).strip()}
@@ -96,10 +118,21 @@ Please fix the code based on the error analysis and provide the repaired code in
                 "parse_error": "Could not parse JSON from model response",
             }
 
+    # Final safety: if repaired_code still looks like raw JSON, extract it
+    repaired = result.get("repaired_code", "")
+    if repaired.startswith("{") and "repaired_code" in repaired:
+        try:
+            inner = json.loads(repaired)
+            repaired = inner.get("repaired_code", repaired)
+            result["repaired_code"] = repaired
+        except json.JSONDecodeError:
+            pass
+
     return result
 
 
 if __name__ == "__main__":
+    # Example usage
     sample_code = """
 def add(a, b):
     return a - b  # Bug: should be a + b

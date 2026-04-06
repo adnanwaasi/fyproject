@@ -27,15 +27,17 @@ from code_generator import (
     write_generated_code_to_file,
     GeneratedCodeFile,
 )
-from test_case_generator import generate_test_cases, TestCaseCollection, TestCase
+from test_case_generator import generate_test_cases, TestCaseCollection
 from test_execution_verify import (
     run_all_tests,
     print_summary,
     TestResult,
+    TestCase as ExecutionTestCase,
     find_main_file,
 )
 from error_analyser import analyze_errors
 from repair_prompt import repair_code
+from memory import GenerationMemory
 
 
 @dataclass
@@ -43,8 +45,8 @@ class PipelineConfig:
     """Configuration for the synthesis pipeline."""
 
     output_dir: str = "real"
-    max_repair_iterations: int = 2
-    model: str = "openai/gpt-oss-20b"
+    max_repair_iterations: int = 1
+    model: str = "gemma4:e4b"
     verbose: bool = True
 
 
@@ -106,14 +108,16 @@ def step_2_generate_code(
 
 
 def step_3_generate_tests(
-    spec: ProblemSpecification, config: PipelineConfig
+    spec: ProblemSpecification, config: PipelineConfig, generated_code: str
 ) -> TestCaseCollection:
-    """Step 3: Generate test cases from problem specification."""
+    """Step 3: Generate test cases from problem specification AND generated code."""
     log("\n" + "=" * 80, config.verbose)
     log("STEP 3: Generating Test Cases", config.verbose)
     log("=" * 80, config.verbose)
 
-    test_cases = generate_test_cases(spec)
+    test_cases = generate_test_cases(
+        spec, generated_code=generated_code, model_name=config.model
+    )
 
     log(f"\nGenerated {len(test_cases.test_cases)} test cases:", config.verbose)
     for tc in test_cases.test_cases:
@@ -143,7 +147,11 @@ def step_4_execute_tests(
         return []
 
     # Run tests
-    results = run_all_tests(test_cases.test_cases, main_file)
+    executable_tests = [
+        ExecutionTestCase.model_validate(tc.model_dump())
+        for tc in test_cases.test_cases
+    ]
+    results = run_all_tests(executable_tests, main_file)
 
     if config.verbose:
         print_summary(results)
@@ -219,6 +227,7 @@ def run_pipeline(
         config = PipelineConfig()
 
     result = PipelineResult(success=False)
+    memory = GenerationMemory()
 
     try:
         # Step 1: Process prompt
@@ -249,7 +258,9 @@ def run_pipeline(
         _emit(
             on_progress, "generating_tests", "running", "Generating test cases...", 0.35
         )
-        result.test_cases = step_3_generate_tests(result.problem_spec, config)
+        result.test_cases = step_3_generate_tests(
+            result.problem_spec, config, result.generated_code.code
+        )
         _emit(
             on_progress,
             "generating_tests",
@@ -281,6 +292,9 @@ def run_pipeline(
             failed_results = [r for r in result.test_results if not r.passed]
             passed = len(result.test_results) - len(failed_results)
             total = len(result.test_results)
+
+            label = "initial" if iteration == 0 else f"repair_{iteration}"
+            memory.add(current_code, passed, total, label=label)
 
             if not failed_results:
                 log("\n✓ All tests passed!", config.verbose)
@@ -353,11 +367,33 @@ def run_pipeline(
                 0.95,
             )
 
-            # Update current code for next iteration
-            current_code = repaired_code
-            current_file = GeneratedCodeFile(
+            # Quick test of repaired code to decide rollback
+            repaired_file = GeneratedCodeFile(
                 file_name=result.generated_code.file_name, code=repaired_code
             )
+            repaired_results = step_4_execute_tests(
+                repaired_file, result.test_cases, config
+            )
+            repaired_passed = sum(1 for r in repaired_results if r.passed)
+            repaired_total = len(repaired_results)
+
+            if memory.should_rollback(repaired_passed, repaired_total):
+                best = memory.best
+                if best is not None and result.generated_code is not None:
+                    log(
+                        f"\n⚠ Repair degraded quality ({repaired_passed}/{repaired_total} vs best {best.test_passed}/{best.test_total}), rolling back...",
+                        config.verbose,
+                    )
+                    current_code = best.code
+                    current_file = GeneratedCodeFile(
+                        file_name=result.generated_code.file_name, code=best.code
+                    )
+                else:
+                    current_code = repaired_code
+                    current_file = repaired_file
+            else:
+                current_code = repaired_code
+                current_file = repaired_file
 
         # Write final code to output
         _emit(on_progress, "saving_output", "running", "Saving final code...", 0.95)
@@ -428,10 +464,7 @@ def main():
 
     # Configure the pipeline
     config = PipelineConfig(
-        output_dir="real",
-        max_repair_iterations=2,
-        model="llama-3.1-8b-instant",
-        verbose=True,
+        output_dir="real", max_repair_iterations=1, model="gemma4:e4b", verbose=True
     )
 
     # Run the pipeline

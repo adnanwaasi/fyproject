@@ -1,7 +1,6 @@
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
-
-from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
 
 
 SYSTEM_PROMPT = """You are an Error Analyzer.
@@ -27,9 +26,20 @@ Output format:
 
 
 def analyze_errors(
-    code: str, failed_test_cases: list[dict], model: str = DEFAULT_MODEL
+    code: str, failed_test_cases: list[dict], model: str = "gemma4:e4b"
 ) -> dict:
-    llm = build_groq_model(model_name=model)
+    """
+    Analyze failed test cases and identify root causes of errors.
+
+    Args:
+        code: The source code that was tested
+        failed_test_cases: List of failed test cases with their details
+        model: Ollama model to use for analysis
+
+    Returns:
+        Dictionary containing error_summary, error_categories, and root_causes
+    """
+    llm = ChatOllama(model=model)
 
     user_message = f"""Code:
 ```
@@ -46,12 +56,18 @@ Analyze the errors and provide the output in the specified JSON format."""
         HumanMessage(content=user_message),
     ]
 
-    response = invoke_with_retry(llm, messages)
-    response_text: str = (
-        response.content if hasattr(response, "content") else str(response)
-    )
+    response = llm.invoke(messages)
+    content_raw = response.content if hasattr(response, "content") else response
+    if isinstance(content_raw, list):
+        response_text = "\n".join(
+            item if isinstance(item, str) else str(item) for item in content_raw
+        )
+    else:
+        response_text = str(content_raw)
 
+    # Try to parse JSON from the response
     try:
+        # Find JSON in the response (it might be wrapped in markdown code blocks)
         if "```json" in response_text:
             json_start = response_text.find("```json") + 7
             json_end = response_text.find("```", json_start)
@@ -65,6 +81,7 @@ Analyze the errors and provide the output in the specified JSON format."""
 
         result = json.loads(json_str)
     except json.JSONDecodeError:
+        # Return raw response if JSON parsing fails
         result = {
             "error_summary": response_text,
             "error_categories": [],
@@ -76,6 +93,7 @@ Analyze the errors and provide the output in the specified JSON format."""
 
 
 if __name__ == "__main__":
+    # Example usage
     sample_code = """
 def add(a, b):
     return a - b  # Bug: should be a + b

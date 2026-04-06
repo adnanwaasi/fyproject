@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List
 
 from pydantic import BaseModel
 from langchain_ollama import ChatOllama
@@ -44,6 +44,7 @@ class ProblemSpecification(BaseModel):
     edge_cases: List[str]
     assumptions: List[str]
 
+
 def build_parser() -> PydanticOutputParser:
     return PydanticOutputParser(pydantic_object=ProblemSpecification)
 
@@ -60,7 +61,9 @@ def build_prompt_template(system_prompt: str) -> ChatPromptTemplate:
     )
 
 
-def build_model(*, model_name: str = "qwen3:8b", temperature: float = 0.0) -> ChatOllama:
+def build_model(
+    *, model_name: str = "gemma4:e4b", temperature: float = 0.0
+) -> ChatOllama:
     return ChatOllama(
         model=model_name,
         validate_model_on_init=True,
@@ -68,7 +71,9 @@ def build_model(*, model_name: str = "qwen3:8b", temperature: float = 0.0) -> Ch
     )
 
 
-def build_chain(*, system_prompt: str = SYSTEM_PROMPT) -> tuple[object, PydanticOutputParser]:
+def build_chain(
+    *, system_prompt: str = SYSTEM_PROMPT
+) -> tuple[Any, PydanticOutputParser]:
     parser = build_parser()
     prompt = build_prompt_template(system_prompt)
     model = build_model()

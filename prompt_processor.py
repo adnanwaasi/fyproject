@@ -1,10 +1,9 @@
-from typing import List
+from typing import Any, List
 
 from pydantic import BaseModel
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-
-from groq_llm import build_groq_model, invoke_with_retry, DEFAULT_MODEL
 
 
 RAW_SYSTEM_PROMPT = """You are a Prompt Processor for a code synthesis system.
@@ -32,6 +31,8 @@ Output format:
 """
 
 
+# LangChain prompt templates treat `{...}` as variables, so we escape braces to
+# ensure the JSON example is sent literally.
 SYSTEM_PROMPT = RAW_SYSTEM_PROMPT.replace("{", "{{").replace("}", "}}")
 
 
@@ -60,20 +61,34 @@ def build_prompt_template(system_prompt: str) -> ChatPromptTemplate:
     )
 
 
-def process_user_input(
-    user_input: str, model_name: str = DEFAULT_MODEL
-) -> ProblemSpecification:
-    parser = build_parser()
-    prompt = build_prompt_template(SYSTEM_PROMPT)
-    model = build_groq_model(model_name=model_name, json_mode=True)
-
-    messages = prompt.format_messages(
-        user_input=user_input,
-        format_instructions=parser.get_format_instructions(),
+def build_model(
+    *, model_name: str = "gemma4:e4b", temperature: float = 0.0
+) -> ChatOllama:
+    return ChatOllama(
+        model=model_name,
+        validate_model_on_init=True,
+        temperature=temperature,
     )
-    response = invoke_with_retry(model, messages)
-    content = response.content if hasattr(response, "content") else str(response)
-    return parser.parse(content)
+
+
+def build_chain(
+    *, system_prompt: str = SYSTEM_PROMPT
+) -> tuple[Any, PydanticOutputParser]:
+    parser = build_parser()
+    prompt = build_prompt_template(system_prompt)
+    model = build_model()
+    chain = prompt | model | parser
+    return chain, parser
+
+
+def process_user_input(user_input: str) -> ProblemSpecification:
+    chain, parser = build_chain()
+    return chain.invoke(
+        {
+            "user_input": user_input,
+            "format_instructions": parser.get_format_instructions(),
+        }
+    )
 
 
 def main() -> None:
