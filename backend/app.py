@@ -119,6 +119,7 @@ async def rate_limit(request: Request):
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000)
     max_iterations: int = Field(default=1, ge=1, le=10)
+    acceptance_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     model: str = Field(default="gemma4:e4b", min_length=1)
     output_dir: str = Field(default="real", min_length=1)
 
@@ -370,6 +371,7 @@ async def generate_code(request: GenerateRequest, background_tasks: BackgroundTa
     config = PipelineConfig(
         output_dir=request.output_dir,
         max_repair_iterations=request.max_iterations,
+        acceptance_threshold=request.acceptance_threshold,
         model=request.model,
         verbose=True,
     )
@@ -396,6 +398,7 @@ async def generate_code_stream(request: GenerateRequest):
     config = PipelineConfig(
         output_dir=request.output_dir,
         max_repair_iterations=request.max_iterations,
+        acceptance_threshold=request.acceptance_threshold,
         model=request.model,
         verbose=True,
     )
@@ -435,6 +438,7 @@ async def generate_code_sync(request: GenerateRequest):
     config = PipelineConfig(
         output_dir=request.output_dir,
         max_repair_iterations=request.max_iterations,
+        acceptance_threshold=request.acceptance_threshold,
         model=request.model,
         verbose=True,
     )

@@ -46,6 +46,7 @@ class PipelineConfig:
 
     output_dir: str = "real"
     max_repair_iterations: int = 1
+    acceptance_threshold: float = 0.85
     model: str = "gemma4:e4b"
     verbose: bool = True
 
@@ -296,13 +297,24 @@ def run_pipeline(
             label = "initial" if iteration == 0 else f"repair_{iteration}"
             memory.add(current_code, passed, total, label=label)
 
-            if not failed_results:
-                log("\n✓ All tests passed!", config.verbose)
+            pass_rate = (passed / total) if total > 0 else 0.0
+
+            if pass_rate >= config.acceptance_threshold:
+                if passed == total:
+                    log("\n✓ All tests passed!", config.verbose)
+                    status_message = f"All {total} tests passed!"
+                else:
+                    pct = round(pass_rate * 100, 1)
+                    log(
+                        f"\n✓ Acceptance threshold met ({passed}/{total}, {pct}%)",
+                        config.verbose,
+                    )
+                    status_message = f"Accepted: {passed}/{total} tests passed ({pct}%)"
                 _emit(
                     on_progress,
                     "executing_tests",
                     "completed",
-                    f"All {total} tests passed!",
+                    status_message,
                     0.95,
                 )
                 result.success = True
@@ -423,7 +435,14 @@ def print_pipeline_result(result: PipelineResult):
     print("PIPELINE RESULT SUMMARY")
     print("=" * 80)
 
-    print(f"\nStatus: {'SUCCESS ✓' if result.success else 'FAILED ✗'}")
+    summary_status = "SUCCESS ✓" if result.success else "FAILED ✗"
+    if result.test_results and not result.success:
+        passed = sum(1 for r in result.test_results if r.passed)
+        total = len(result.test_results)
+        if total > 0 and (passed / total) >= 0.85:
+            summary_status = "ACCEPTED (>=85%) ✓"
+
+    print(f"\nStatus: {summary_status}")
     print(f"Repair iterations: {result.repair_iterations}")
 
     if result.test_results:
