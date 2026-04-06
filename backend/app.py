@@ -118,7 +118,7 @@ async def rate_limit(request: Request):
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=10000)
-    max_iterations: int = Field(default=1, ge=1, le=10)
+    max_iterations: int = Field(default=2, ge=1, le=10)
     acceptance_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
     model: str = Field(default="gemma4:e4b", min_length=1)
     output_dir: str = Field(default="real", min_length=1)

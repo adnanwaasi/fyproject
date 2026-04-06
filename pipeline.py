@@ -45,7 +45,7 @@ class PipelineConfig:
     """Configuration for the synthesis pipeline."""
 
     output_dir: str = "real"
-    max_repair_iterations: int = 1
+    max_repair_iterations: int = 2
     acceptance_threshold: float = 0.85
     model: str = "gemma4:e4b"
     verbose: bool = True
@@ -483,7 +483,7 @@ def main():
 
     # Configure the pipeline
     config = PipelineConfig(
-        output_dir="real", max_repair_iterations=1, model="gemma4:e4b", verbose=True
+        output_dir="real", max_repair_iterations=2, model="gemma4:e4b", verbose=True
     )
 
     # Run the pipeline
