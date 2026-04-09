@@ -64,6 +64,12 @@ class PipelineResult:
     final_code: Optional[str] = None
     error_analysis: Optional[dict] = None
     output_file: Optional[str] = None
+    accepted: bool = False
+    all_tests_passed: bool = False
+    tests_passed: int = 0
+    tests_total: int = 0
+    pass_rate: float = 0.0
+    acceptance_threshold: float = 0.85
 
 
 def log(message: str, verbose: bool = True):
@@ -228,6 +234,7 @@ def run_pipeline(
         config = PipelineConfig()
 
     result = PipelineResult(success=False)
+    result.acceptance_threshold = config.acceptance_threshold
     memory = GenerationMemory()
 
     try:
@@ -299,7 +306,11 @@ def run_pipeline(
 
             pass_rate = (passed / total) if total > 0 else 0.0
 
-            if pass_rate >= config.acceptance_threshold:
+            result.tests_passed = passed
+            result.tests_total = total
+            result.pass_rate = pass_rate
+
+            if total > 0 and pass_rate >= config.acceptance_threshold:
                 if passed == total:
                     log("\n✓ All tests passed!", config.verbose)
                     status_message = f"All {total} tests passed!"
@@ -317,6 +328,8 @@ def run_pipeline(
                     status_message,
                     0.95,
                 )
+                result.accepted = True
+                result.all_tests_passed = passed == total
                 result.success = True
                 result.final_code = current_code
                 result.repair_iterations = iteration
@@ -435,12 +448,13 @@ def print_pipeline_result(result: PipelineResult):
     print("PIPELINE RESULT SUMMARY")
     print("=" * 80)
 
-    summary_status = "SUCCESS ✓" if result.success else "FAILED ✗"
-    if result.test_results and not result.success:
-        passed = sum(1 for r in result.test_results if r.passed)
-        total = len(result.test_results)
-        if total > 0 and (passed / total) >= 0.85:
-            summary_status = "ACCEPTED (>=85%) ✓"
+    if result.all_tests_passed:
+        summary_status = "SUCCESS ✓"
+    elif result.accepted:
+        threshold_pct = round(result.acceptance_threshold * 100, 1)
+        summary_status = f"ACCEPTED (>={threshold_pct}%) ✓"
+    else:
+        summary_status = "FAILED ✗"
 
     print(f"\nStatus: {summary_status}")
     print(f"Repair iterations: {result.repair_iterations}")

@@ -6,12 +6,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import traceback
 import uuid
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, Request
@@ -57,6 +59,8 @@ jobs: dict[str, dict] = {}
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 RATE_LIMIT_MAX_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
+API_KEY = os.getenv("CODE_SYNTH_API_KEY")
+SAFE_OUTPUT_BASE = Path(os.getenv("CODE_SYNTH_OUTPUT_BASE", "real")).resolve()
 
 PIPELINE_TIMEOUT_SECONDS = 300
 
@@ -124,6 +128,30 @@ class GenerateRequest(BaseModel):
     output_dir: str = Field(default="real", min_length=1)
 
 
+def _validate_output_dir(output_dir: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_\-./]+", output_dir):
+        raise HTTPException(status_code=400, detail="Invalid output_dir characters")
+    if output_dir.startswith("/") or ".." in output_dir.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid output_dir path")
+
+    normalized = output_dir.strip("./")
+    if normalized in ("", "real"):
+        target = SAFE_OUTPUT_BASE
+    else:
+        target = (SAFE_OUTPUT_BASE / normalized).resolve()
+    if target != SAFE_OUTPUT_BASE and SAFE_OUTPUT_BASE not in target.parents:
+        raise HTTPException(status_code=400, detail="output_dir escapes safe base")
+    return str(target)
+
+
+async def require_api_key(request: Request):
+    if not API_KEY:
+        return
+    provided = request.headers.get("X-API-Key")
+    if provided != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 class JobStatus(BaseModel):
     job_id: str
     status: str
@@ -167,6 +195,11 @@ def serialize_pipeline_result(result: PipelineResult) -> dict:
 
     return {
         "success": result.success,
+        "accepted": result.accepted,
+        "all_tests_passed": result.all_tests_passed,
+        "tests_passed": result.tests_passed,
+        "tests_total": result.tests_total,
+        "pass_rate": result.pass_rate,
         "repair_iterations": result.repair_iterations,
         "final_code": result.final_code,
         "output_file": result.output_file,
@@ -298,9 +331,15 @@ async def _stream_pipeline(job_id: str, prompt: str, config: PipelineConfig):
                 {
                     "step": "completed",
                     "status": "completed",
-                    "message": "Pipeline completed successfully"
-                    if result.success
-                    else f"Pipeline finished with {result.repair_iterations} repair iterations",
+                    "message": (
+                        "Pipeline completed successfully"
+                        if result.all_tests_passed
+                        else (
+                            f"Pipeline accepted ({result.tests_passed}/{result.tests_total} tests, {round(result.pass_rate * 100, 1)}%)"
+                            if result.accepted
+                            else f"Pipeline finished with {result.repair_iterations} repair iterations"
+                        )
+                    ),
                     "progress": 1.0,
                     "result": serialize_pipeline_result(result),
                 }
@@ -363,13 +402,17 @@ async def root():
     return {"message": "Code Synthesis API", "version": "2.0.0"}
 
 
-@app.post("/api/generate", response_model=JobStatus, dependencies=[Depends(rate_limit)])
+@app.post(
+    "/api/generate",
+    response_model=JobStatus,
+    dependencies=[Depends(rate_limit), Depends(require_api_key)],
+)
 async def generate_code(request: GenerateRequest, background_tasks: BackgroundTasks):
     prompt = request.prompt.strip()
     job_id = str(uuid.uuid4())
 
     config = PipelineConfig(
-        output_dir=request.output_dir,
+        output_dir=_validate_output_dir(request.output_dir),
         max_repair_iterations=request.max_iterations,
         acceptance_threshold=request.acceptance_threshold,
         model=request.model,
@@ -390,13 +433,16 @@ async def generate_code(request: GenerateRequest, background_tasks: BackgroundTa
     return _job_to_status(jobs[job_id])
 
 
-@app.post("/api/generate/stream", dependencies=[Depends(rate_limit)])
+@app.post(
+    "/api/generate/stream",
+    dependencies=[Depends(rate_limit), Depends(require_api_key)],
+)
 async def generate_code_stream(request: GenerateRequest):
     prompt = request.prompt.strip()
     job_id = str(uuid.uuid4())
 
     config = PipelineConfig(
-        output_dir=request.output_dir,
+        output_dir=_validate_output_dir(request.output_dir),
         max_repair_iterations=request.max_iterations,
         acceptance_threshold=request.acceptance_threshold,
         model=request.model,
@@ -430,13 +476,16 @@ async def generate_code_stream(request: GenerateRequest):
     )
 
 
-@app.post("/api/generate/sync", dependencies=[Depends(rate_limit)])
+@app.post(
+    "/api/generate/sync",
+    dependencies=[Depends(rate_limit), Depends(require_api_key)],
+)
 async def generate_code_sync(request: GenerateRequest):
     prompt = request.prompt.strip()
     logger.info("Sync generation | prompt=%.100s", prompt)
 
     config = PipelineConfig(
-        output_dir=request.output_dir,
+        output_dir=_validate_output_dir(request.output_dir),
         max_repair_iterations=request.max_iterations,
         acceptance_threshold=request.acceptance_threshold,
         model=request.model,
@@ -460,7 +509,11 @@ async def generate_code_sync(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/jobs/{job_id}", response_model=JobStatus)
+@app.get(
+    "/api/jobs/{job_id}",
+    response_model=JobStatus,
+    dependencies=[Depends(require_api_key)],
+)
 async def get_job_status(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -468,7 +521,9 @@ async def get_job_status(job_id: str):
     return _job_to_status(jobs[job_id])
 
 
-@app.get("/api/jobs", response_model=PaginatedJobs)
+@app.get(
+    "/api/jobs", response_model=PaginatedJobs, dependencies=[Depends(require_api_key)]
+)
 async def list_jobs(
     status: Optional[str] = Query(
         default=None,
@@ -496,7 +551,7 @@ async def list_jobs(
     )
 
 
-@app.post("/api/jobs/{job_id}/cancel")
+@app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(require_api_key)])
 async def cancel_job(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -517,7 +572,7 @@ async def cancel_job(job_id: str):
     return {"message": "Job cancelled", "job_id": job_id}
 
 
-@app.delete("/api/jobs/{job_id}")
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_api_key)])
 async def delete_job(job_id: str):
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -538,7 +593,7 @@ async def health_check():
     }
 
 
-@app.get("/api/metrics")
+@app.get("/api/metrics", dependencies=[Depends(require_api_key)])
 async def metrics():
     all_jobs = list(jobs.values())
     total = len(all_jobs)

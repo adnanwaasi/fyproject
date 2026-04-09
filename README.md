@@ -1,6 +1,6 @@
 # fyproject
 
-`initial.py` generates Python code and saves it locally. It can optionally re-generate and re-run the generated file a few times until it executes successfully.
+Code synthesis pipeline using Ollama (gemma4:e4b) with automatic repair and test execution.
 
 ## Setup
 
@@ -8,23 +8,37 @@
 pip install -r requirements.txt
 ```
 
-You also need Ollama running locally and an available model (default: `qwen3:14b`).
+Requires Ollama running locally with model `gemma4:e4b`.
 
 ## Run
 
-Interactive prompt (asks what to generate):
+### CLI Pipeline
 
 ```bash
-python initial.py
+python pipeline.py "generate fibonacci series for n terms"
 ```
 
-Generate + run + auto-fix loop (retries on failure):
+### FastAPI Backend
 
 ```bash
-python initial.py --loop --max-attempts 5 --run-timeout 15
+python -m uvicorn backend.app:app --reload --port 8000
 ```
 
-## Outputs
+#### Endpoints
 
-- Writes the generated solution into `real/` (or `--out-dir`).
-- Prints the parsed structured output as JSON.
+- `POST /api/generate` - Async job submission
+- `POST /api/generate/sync` - Synchronous generation
+- `POST /api/generate/stream` - SSE streaming
+- `GET /api/jobs/{job_id}` - Job status
+- `GET /api/health` - Health check
+
+## Configuration
+
+- Default repair iterations: 2
+- Acceptance threshold: 85% (≥85% tests pass = accepted)
+- Output directory: `real/`
+
+## Environment Variables
+
+- `CODE_SYNTH_API_KEY` - Optional API key for protected endpoints
+- `CODE_SYNTH_OUTPUT_BASE` - Base directory for generated code (default: `real`)

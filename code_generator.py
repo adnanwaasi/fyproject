@@ -72,6 +72,13 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
+def _strip_leading_code_labels(code: str) -> str:
+    lines = code.splitlines()
+    while lines and re.fullmatch(r"\s*code[_\- ]?v?\d+\s*", lines[0] or ""):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def parse_generated_code(payload: str | dict[str, Any]) -> GeneratedCodeFile:
     """Parse a generated output payload into a `GeneratedCodeFile`.
 
@@ -92,7 +99,7 @@ def parse_generated_code(payload: str | dict[str, Any]) -> GeneratedCodeFile:
         data["file_name"] = "main.py"
 
     generated = GeneratedCodeFile.model_validate(data)
-    generated.code = _strip_markdown_fences(generated.code)
+    generated.code = _strip_leading_code_labels(_strip_markdown_fences(generated.code))
     return generated
 
 
@@ -116,7 +123,7 @@ def write_generated_code_to_file(
     if parent:
         os.makedirs(parent, exist_ok=True)
 
-    content = generated.code
+    content = _strip_leading_code_labels(_strip_markdown_fences(generated.code))
     if content and not content.endswith("\n"):
         content += "\n"
 
@@ -208,7 +215,7 @@ def generate_code(problem_spec: dict) -> GeneratedCodeFile:
     result = parse_generated_code(content)
 
     # Extra safety: ensure no accidental Markdown fences leak through.
-    result.code = _strip_markdown_fences(result.code)
+    result.code = _strip_leading_code_labels(_strip_markdown_fences(result.code))
     return result
 
 

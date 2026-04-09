@@ -58,6 +58,13 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
+def _strip_leading_code_labels(code: str) -> str:
+    lines = code.splitlines()
+    while lines and re.fullmatch(r"\s*code[_\- ]?v?\d+\s*", lines[0] or ""):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def repair_code(code: str, error_analysis: dict, model: str = "gemma4:e4b") -> dict:
     """
     Repair buggy code based on error analysis.
@@ -105,7 +112,9 @@ Please fix the code based on the error analysis and provide the repaired code in
         if "repaired_code" in result:
             code_val = result["repaired_code"]
             # If it's a string with escaped newlines, json.loads already handles it
-            result["repaired_code"] = _strip_markdown_fences(code_val)
+            result["repaired_code"] = _strip_leading_code_labels(
+                _strip_markdown_fences(code_val)
+            )
 
     except json.JSONDecodeError:
         # If JSON parsing fails, try to extract code directly
@@ -127,6 +136,11 @@ Please fix the code based on the error analysis and provide the repaired code in
             result["repaired_code"] = repaired
         except json.JSONDecodeError:
             pass
+
+    repaired = result.get("repaired_code", "")
+    result["repaired_code"] = _strip_leading_code_labels(
+        _strip_markdown_fences(repaired)
+    )
 
     return result
 
