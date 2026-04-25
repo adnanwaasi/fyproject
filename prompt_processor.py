@@ -1,9 +1,12 @@
+import json
+import re
 from typing import Any, List
 
 from pydantic import BaseModel
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
 
 
 RAW_SYSTEM_PROMPT = """You are a Prompt Processor for a code synthesis system.
@@ -81,14 +84,33 @@ def build_chain(
     return chain, parser
 
 
+def _fix_json_output(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+    text = re.sub(r'\\(?![/bfnrt"\\])', r"\\\\", text)
+    return text
+
+
 def process_user_input(user_input: str) -> ProblemSpecification:
     chain, parser = build_chain()
-    return chain.invoke(
-        {
-            "user_input": user_input,
-            "format_instructions": parser.get_format_instructions(),
-        }
-    )
+    try:
+        return chain.invoke(
+            {
+                "user_input": user_input,
+                "format_instructions": parser.get_format_instructions(),
+            }
+        )
+    except OutputParserException as e:
+        raw = e.llm_output or ""
+        fixed = _fix_json_output(raw)
+        try:
+            data = json.loads(fixed)
+            return ProblemSpecification.model_validate(data)
+        except (json.JSONDecodeError, Exception):
+            pass
+        raise
 
 
 def main() -> None:
