@@ -70,7 +70,7 @@ function App() {
   const [jobs, setJobs] = useState([]);
   const [settings, setSettings] = useState({
     maxIterations: 3,
-    model: 'qwen3:8b',
+    model: 'gemma4:e4b',
     outputDir: 'real'
   });
   const [expandedSections, setExpandedSections] = useState({
@@ -312,9 +312,9 @@ function App() {
                   onChange={(e) => setSettings({ ...settings, model: e.target.value })}
                   className="w-full px-4 py-2 rounded-lg border border-slate-300 bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                 >
-                  <option value="qwen3:8b">Qwen3 8B</option>
+                  <option value="gemma4:e4b">Gemma 4B</option>
+                  <option value="llama3.1:8b">Llama 3.1 8B</option>
                   <option value="qwen3:14b">Qwen3 14B</option>
-                  <option value="llama3:8b">Llama3 8B</option>
                   <option value="codellama:13b">CodeLlama 13B</option>
                 </select>
               </div>
