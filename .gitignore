@@ -5,3 +5,5 @@ __pycache__/
 .env
 .sisyphus/
 grokapi.txt
+frontend/dist/
+frontend/node_modules/
