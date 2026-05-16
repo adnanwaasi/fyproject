@@ -1,6 +1,19 @@
 # fyproject
 
-Code synthesis pipeline using Ollama (gemma4:e4b) with automatic repair and test execution.
+AI-powered code synthesis pipeline that generates, tests, and self-repairs Python programs from natural language descriptions.
+
+## How It Works
+
+Given a natural language prompt (e.g., *"generate fibonacci series for n terms"*), the pipeline:
+
+1. **Prompt Processing** — Extracts structured problem specifications (inputs, outputs, constraints, edge cases)
+2. **Code Generation** — Produces Python code via Ollama (`gemma4:e4b`)
+3. **Test Generation** — Automatically creates test cases from the spec and generated code
+4. **Test Execution** — Runs tests against the generated code and collects pass/fail results
+5. **Error Analysis** — Diagnoses root causes of failing tests using the LLM
+6. **Self-Repair** — Rewrites code to fix identified issues, with rollback if quality degrades
+
+The cycle repeats until all tests pass or the acceptance threshold (≥85%) is met.
 
 ## Setup
 
